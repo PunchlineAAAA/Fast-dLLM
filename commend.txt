@@ -1,0 +1,47 @@
+conda create -p ~/workspace/envs/fastdllm2 python=3.10 -y
+conda activate ~/workspace/envs/fastdllm2
+conda install mpi4py
+git clone https://github.com/PunchlineAAAA/Fast-dLLM.git
+cd Fast-dLLM/v2
+pip install -e .
+pip install gradio==3.44.3
+# pip install lm_eval==0.4.8
+pip install "antlr4-python3-runtime==4.11"
+pip install sympy
+pip install math_verify
+pip install "lm_eval[math]==0.4.8"
+pip uninstall -y lmflow
+mkdir -p logs
+mkdir -p results
+echo 'export HF_HOME=/run/hf_cache' >> ~/.bashrc
+echo 'export HUGGINGFACE_HUB_CACHE=/run/hf_cache' >> ~/.bashrc
+echo 'export HF_DATASETS_CACHE=/run/hf_cache' >> ~/.bashrc  
+echo 'export XDG_CACHE_HOME=/run/hf_cache' >> ~/.bashrc
+source ~/.bashrc
+——————————————————————————————————————————————————————————————
+cd Fast-dLLM/v2 
+echo 'export HF_HOME=/run/hf_cache' >> ~/.bashrc
+echo 'export HUGGINGFACE_HUB_CACHE=/run/hf_cache' >> ~/.bashrc
+echo 'export HF_DATASETS_CACHE=/run/hf_cache' >> ~/.bashrc
+echo 'export XDG_CACHE_HOME=/run/hf_cache' >> ~/.bashrc
+source ~/.bashrc
+conda activate /home/jovyan/workspace/envs/fastdllm2
+python 5.py
+
+zip -r diffusion_attn.zip diffusion_attn/
+
+ln -s /run/hf_cache/modules/transformers_modules/Efficient-Large-Model/Fast_dLLM_v2_7B/200e3eff9223d719e97e561c2291566d9b1cc28d modeling_src
+
+accelerate launch eval.py --tasks gsm8k --batch_size 32 --num_fewshot 0 \
+--confirm_run_unsafe_code --model fast_dllm_v2 --fewshot_as_multiturn --apply_chat_template \
+--model_args model_path=Efficient-Large-Model/Fast_dLLM_v2_7B,threshold=0.9,show_speed=True \
+--output_path results/gsm8k \
+--log_samples \
+| tee logs/gsm8k.log
+
+accelerate launch eval.py --tasks minerva_math --batch_size 32 --num_fewshot 0 \
+--confirm_run_unsafe_code --model fast_dllm_v2 --fewshot_as_multiturn --apply_chat_template \
+--model_args model_path=Efficient-Large-Model/Fast_dLLM_v2_7B,threshold=0.9,show_speed=True \
+--output_path results/minerva_math \
+--log_samples \
+| tee logs/minerva_math.log
