@@ -1,5 +1,7 @@
-conda create -p ~/workspace/envs/fastdllm2 python=3.10 -y
-conda activate ~/workspace/envs/fastdllm2
+unset http_proxy https_proxy ftp_proxy all_proxy
+unset HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
+conda create -p ~/lvshanshan/envs/fastdllm2 python=3.10 -y
+conda activate ~/lvshanshan/envs/fastdllm2
 conda install mpi4py
 git clone https://github.com/PunchlineAAAA/Fast-dLLM.git
 cd Fast-dLLM/v2
@@ -10,23 +12,35 @@ pip install "antlr4-python3-runtime==4.11"
 pip install sympy
 pip install math_verify
 pip install "lm_eval[math]==0.4.8"
+pip install imageio
 pip uninstall -y lmflow
 mkdir -p logs
 mkdir -p results
-echo 'export HF_HOME=/run/hf_cache' >> ~/.bashrc
-echo 'export HUGGINGFACE_HUB_CACHE=/run/hf_cache' >> ~/.bashrc
-echo 'export HF_DATASETS_CACHE=/run/hf_cache' >> ~/.bashrc  
-echo 'export XDG_CACHE_HOME=/run/hf_cache' >> ~/.bashrc
+bash
+# echo 'export HF_HOME=/home/geyuyao/lvshanshan/hf_cache' >> ~/.bashrc
+# echo 'export HUGGINGFACE_HUB_CACHE=/home/geyuyao/lvshanshan/hf_cache/hub' >> ~/.bashrc
+# echo 'export HF_DATASETS_CACHE=/home/geyuyao/lvshanshan/hf_cache/datasets' >> ~/.bashrc  
+# echo 'export XDG_CACHE_HOME=/home/geyuyao/lvshanshan/hf_cache/hub' >> ~/.bashrc
+export HF_HOME=/home/geyuyao/lvshanshan/hf_cache
+export HUGGINGFACE_HUB_CACHE=/home/geyuyao/lvshanshan/hf_cache/hub
+export HF_DATASETS_CACHE=/home/geyuyao/lvshanshan/hf_cache/datasets
+export XDG_CACHE_HOME=/home/geyuyao/lvshanshan/hf_cache/hub
 source ~/.bashrc
 ——————————————————————————————————————————————————————————————
-cd Fast-dLLM/v2 
-echo 'export HF_HOME=/run/hf_cache' >> ~/.bashrc
-echo 'export HUGGINGFACE_HUB_CACHE=/run/hf_cache' >> ~/.bashrc
-echo 'export HF_DATASETS_CACHE=/run/hf_cache' >> ~/.bashrc
-echo 'export XDG_CACHE_HOME=/run/hf_cache' >> ~/.bashrc
-source ~/.bashrc
-conda activate /home/jovyan/workspace/envs/fastdllm2
-python 5.py
+bash
+cd Fast-dLLM/v2
+unset http_proxy https_proxy ftp_proxy all_proxy
+unset HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
+export HF_HOME=/home/geyuyao/lvshanshan/hf_cache
+export HUGGINGFACE_HUB_CACHE=/home/geyuyao/lvshanshan/hf_cache/hub
+export HF_DATASETS_CACHE=/home/geyuyao/lvshanshan/hf_cache/datasets
+export XDG_CACHE_HOME=/home/geyuyao/lvshanshan/hf_cache/hub
+conda activate ~/lvshanshan/envs/fastdllm2
+python attention_entropy_probe.py --jsonl-prompts-file test.jsonl
+python entropy_report_analyzer.py
+python 3layers_heads.py
+zip -r attn_compare.zip attn_compare/
+tail -n 250 entropy_report.json
 
 zip -r diffusion_attn.zip diffusion_attn/
 

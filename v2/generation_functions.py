@@ -1,6 +1,7 @@
 from typing import Callable, Optional, Union
 import torch
 import types
+from transformers.cache_utils import DynamicCache
 from transformers.utils import auto_docstring, logging
 
 # Constants for Fast_dLLM model
@@ -70,7 +71,8 @@ class Fast_dLLM_QwenForCausalLM:
                 else:
                     input_ids[predict_sample_idx, min_len] = next_token.squeeze(dim=-1)
         else:
-            past_key_values = None
+            # past_key_values = None
+             past_key_values = DynamicCache()
 
         seq_block_idx = seq_len // block_size
         finished_flag = torch.zeros((batch_size), device=self.device, dtype=torch.bool)

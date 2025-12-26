@@ -13,3 +13,6 @@ v2/results/
 v2/diffusion_attn/
 *.egg-info/
 *checkpoint*
+v2/entropy_report1.json
+v2/entropy_report2.json
+v2/qwen_entropy_report.json
