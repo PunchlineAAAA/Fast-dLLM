@@ -257,6 +257,8 @@ class Fast_dLLM_QwenAttention(nn.Module):
                 self._attn_trace = []
             if not hasattr(self, "_attn_tokens"):
                 self._attn_tokens = []
+            if not hasattr(self, "_attn_mask"):
+                self._attn_mask = []
 
             if attn_weights is not None:
                 # sdpa 后端直接给了注意力矩阵 [B, H, L_q, L_k]
@@ -299,6 +301,9 @@ class Fast_dLLM_QwenAttention(nn.Module):
                 else:
                     # 防御性处理：压到 [1, L] 再存
                     self._attn_tokens.append(token_ids.view(1, -1).detach().cpu())
+            # 存这一 forward step 的 mask，便于计算可见 key 数
+            if isinstance(attention_mask, torch.Tensor):
+                self._attn_mask.append(attention_mask.detach().cpu())
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
