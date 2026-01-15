@@ -8,9 +8,11 @@ dream/evals_results/
 .DS_Store
 **/.DS_Store
 modeling_src
+v2/modeling_src
 v2/logs/
 v2/results/
 v2/diffusion_attn/
+v2/qwen_attn/
 *.egg-info/
 *checkpoint*
 v2/entropy_report1.json
