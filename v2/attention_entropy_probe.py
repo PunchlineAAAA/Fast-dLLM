@@ -37,13 +37,20 @@ class StepEntropy:
     layer: int  # 记录是模型的第几层
     step: int  # 采样生成的第几步
     concentration: float  # 注意力集中度指标（1-平均熵/log(K)）
+    concentration_corrected: float  # 使用可见 key 数修正后的集中度
     head_entropy_mean: List[float]  # 各注意力头熵平均值
     head_entropy_quantiles: Dict[str, float]  # 熵分位数(衡量是否集中某些头)
     head_variance: float  # 注意力头间熵的方差(偏好差异)
     seq_len_q: int  # Q序列长度（查询长度）
     seq_len_k: int  # K序列长度（键长度）
+    effective_key_count: float  # 实际可见 key 数（按 mask 修正后的平均）
+    visible_key_ratio: float  # 可见 key 比例 (effective_key_count / seq_len_k)
     token_persistence_entropy: float  # token跨步稳定性熵（越低越稳定）
     top_token_jaccard: float  # token关注集合相似度（Jaccard）
+    token_stability: float  # 当前 step token 到下一步的稳定性
+    top_token_positions: List[int]  # 被关注的 key 位置索引
+    top_token_ids: List[int]  # 被关注的 token id
+    top_token_strs: List[str]  # 被关注的 token 字符
 
 
 @dataclass
@@ -69,6 +76,8 @@ def clear_all_attn_traces(model: AutoModelForCausalLM) -> None:
             sa._last_attn = None
         if hasattr(sa, "_attn_tokens"):
             sa._attn_tokens.clear()
+        if hasattr(sa, "_attn_mask"):
+            sa._attn_mask.clear()
 
 
 def attach_sampler(model: AutoModelForCausalLM) -> None:
@@ -138,6 +147,54 @@ def _top_token_jaccard(token_dists: Sequence[torch.Tensor], top_t: int) -> float
     return float(mean(overlaps))
 
 
+def _step_token_stability(token_steps: Sequence[torch.Tensor]) -> List[float]:
+    """
+    计算每一步 token 是否在下一步发生变化，返回每步稳定率。
+    稳定率 = 相同 token 数量 / 可比较 token 数量。
+    """
+    if not token_steps:
+        return []
+
+    stabilities = []
+    for idx in range(len(token_steps)):
+        if idx >= len(token_steps) - 1:
+            stabilities.append(0.0)
+            continue
+        current = token_steps[idx].squeeze(0)
+        nxt = token_steps[idx + 1].squeeze(0)
+        min_len = min(current.numel(), nxt.numel())
+        if min_len == 0:
+            stabilities.append(0.0)
+            continue
+        stable = (current[:min_len] == nxt[:min_len]).float().mean().item()
+        stabilities.append(stable)
+    return stabilities
+
+
+def _effective_key_count(
+    attn: torch.Tensor, mask: torch.Tensor | None
+) -> float:
+    if mask is None:
+        visible_mask = attn > 1e-8
+        return visible_mask.float().sum(dim=-1).mean().item()
+
+    mask_tensor = mask
+    if mask_tensor.dtype != torch.bool:
+        mask_tensor = mask_tensor > 0
+
+    if mask_tensor.dim() == 4:
+        mask_tensor = mask_tensor[:, 0]
+    elif mask_tensor.dim() == 3:
+        pass
+    elif mask_tensor.dim() == 2:
+        mask_tensor = mask_tensor[:, None, :]
+    else:
+        visible_mask = attn > 1e-8
+        return visible_mask.float().sum(dim=-1).mean().item()
+
+    return mask_tensor.float().sum(dim=-1).mean().item()
+
+
 # =========================
 # Core metrics
 # =========================
@@ -145,8 +202,11 @@ def _top_token_jaccard(token_dists: Sequence[torch.Tensor], top_t: int) -> float
 
 def compute_layer_metrics(
     trace: Sequence[torch.Tensor],
+    token_steps: Sequence[torch.Tensor],
+    mask_steps: Sequence[torch.Tensor],
     block_size: int,
     top_t: int,
+    tokenizer: AutoTokenizer,
 ) -> List[StepEntropy]:
     """
     对某一层(layer)记录的attention轨迹trace按step聚合，
@@ -158,6 +218,7 @@ def compute_layer_metrics(
 
     key_focus_steps = []
     token_top_sets = []
+    token_stability_steps = _step_token_stability(token_steps)
 
     for step_idx, attn in enumerate(trace):
         # attn形状: [B, H, Q, K] = batch, head数, 查询长度, 键长度
@@ -171,6 +232,13 @@ def compute_layer_metrics(
         # 注意力集中度: 1 - (平均熵/log(K))
         # 越接近1代表注意力越集中，越接近0说明越均匀(模型不确定)
         concentration = 1.0 - layer_mean.item() / math.log(k_len)
+
+        # 可见 key 数修正，避免 mask 导致的虚高集中度
+        mask = mask_steps[step_idx] if step_idx < len(mask_steps) else None
+        effective_k = _effective_key_count(attn, mask)
+        safe_effective_k = max(effective_k, 2.0)
+        concentration_corrected = 1.0 - layer_mean.item() / math.log(safe_effective_k)
+        visible_key_ratio = effective_k / k_len if k_len > 0 else 0.0
 
         # 按分位数提供每层注意力分布差异
         head_flat = head_mean.flatten()
@@ -194,18 +262,48 @@ def compute_layer_metrics(
         key_focus_steps.append(normalized_tail)
         token_top_sets.append(normalized_tail)
 
+        top_positions = (
+            torch.topk(key_focus, k=min(top_t, key_focus.numel()), dim=-1).indices
+        )
+        top_positions_list = top_positions.tolist()
+        top_token_ids: List[int] = []
+        top_token_strs: List[str] = []
+        if step_idx < len(token_steps):
+            step_tokens = token_steps[step_idx].squeeze(0)
+            if step_tokens.numel() >= k_len:
+                key_tokens = step_tokens[-k_len:]
+            else:
+                key_tokens = step_tokens
+            for pos in top_positions_list:
+                if pos < key_tokens.numel():
+                    token_id = int(key_tokens[pos])
+                    top_token_ids.append(token_id)
+            if top_token_ids:
+                top_token_strs = tokenizer.convert_ids_to_tokens(top_token_ids)
+
         stats.append(
             StepEntropy(
                 layer=-1,  # 稍后填充
                 step=step_idx,
                 concentration=concentration,
+                concentration_corrected=concentration_corrected,
                 head_entropy_mean=head_mean.tolist(),
                 head_entropy_quantiles=quantiles,
                 head_variance=head_var,
                 seq_len_q=q_len,
                 seq_len_k=k_len,
+                effective_key_count=effective_k,
+                visible_key_ratio=visible_key_ratio,
                 token_persistence_entropy=0.0,  # 下一步赋值
                 top_token_jaccard=0.0,  # 下一步赋值
+                token_stability=(
+                    token_stability_steps[step_idx]
+                    if step_idx < len(token_stability_steps)
+                    else 0.0
+                ),
+                top_token_positions=top_positions_list,
+                top_token_ids=top_token_ids,
+                top_token_strs=top_token_strs,
             )
         )
 
@@ -227,9 +325,15 @@ def summarize_cross_prompt(
     聚合所有prompt的注意力集中度，生成跨prompt的layer稳定趋势统计。
     """
     bucket = {}
+    corrected_bucket = {}
+    visible_ratio_bucket = {}
     for report in reports:
         for step in report.steps:
             bucket.setdefault(step.layer, []).append(step.concentration)
+            corrected_bucket.setdefault(step.layer, []).append(
+                step.concentration_corrected
+            )
+            visible_ratio_bucket.setdefault(step.layer, []).append(step.visible_key_ratio)
 
     summary = {}
     for layer_id, concentrations in bucket.items():
@@ -238,6 +342,10 @@ def summarize_cross_prompt(
             "std_concentration": (
                 pstdev(concentrations) if len(concentrations) > 1 else 0.0
             ),
+            "mean_concentration_corrected": mean(
+                corrected_bucket.get(layer_id, [])
+            ),
+            "mean_visible_key_ratio": mean(visible_ratio_bucket.get(layer_id, [])),
         }
     return summary
 
@@ -300,7 +408,11 @@ def run_probe(
         for layer_id, layer in enumerate(model.model.layers):
             sa = layer.self_attn
             trace = getattr(sa, "_attn_trace", [])
-            layer_stats = compute_layer_metrics(trace, block_size, top_t)
+            token_steps = getattr(sa, "_attn_tokens", [])
+            mask_steps = getattr(sa, "_attn_mask", [])
+            layer_stats = compute_layer_metrics(
+                trace, token_steps, mask_steps, block_size, top_t, tokenizer
+            )
             for stat in layer_stats:
                 stat.layer = layer_id
                 prompt_steps.append(stat)
