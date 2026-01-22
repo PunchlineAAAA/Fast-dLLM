@@ -1,7 +1,6 @@
 from typing import Callable, Optional, Union
 import torch
 import types
-from transformers.cache_utils import DynamicCache
 from transformers.utils import auto_docstring, logging
 
 # Constants for Fast_dLLM model
@@ -13,6 +12,7 @@ TOKEN_COLOR = -0.5
 
 @auto_docstring
 class Fast_dLLM_QwenForCausalLM:
+
     @torch.no_grad()
     def batch_sample(
         self,
@@ -32,32 +32,6 @@ class Fast_dLLM_QwenForCausalLM:
     ):
         num_blocks = max_new_tokens // block_size + seq_len.max().item() // block_size
         batch_size = input_ids.shape[0]
-        
-        # add----------------------------------------------------------------------
-        # def _enable_attn_record():
-        #     """
-        #     在下一次 self.forward 时，要求最后一层 self_attn 记录注意力权重。
-        #     具体记录逻辑由 3.py 里 patch 的 sdpa_with_attn 完成。
-        #     """
-        #     last_attn = self.model.layers[-1].self_attn
-        #     last_attn._record_next_attn = True
-
-        # def _collect_attn():
-        #     """
-        #     从最后一层 self_attn 上取出刚刚保存的 _last_attn_probs，
-        #     丢到 self.model._diffusion_step_attn 里。
-        #     """
-        #     last_attn = self.model.layers[-1].self_attn
-        #     if hasattr(last_attn, "_last_attn_probs"):
-        #         # 统一放在 model.model 上，方便外部脚本读取
-        #         self.model._diffusion_step_attn.append(last_attn._last_attn_probs)
-        #         del last_attn._last_attn_probs
-                
-        # if not hasattr(self.model, "_diffusion_step_attn"):
-        #     self.model._diffusion_step_attn = []
-        # else:
-        #     self.model._diffusion_step_attn.clear()
-        #-------------------------------------------------------------------------------
 
         if min_len > block_size:
             output = self.forward(input_ids=input_ids[:, :(min_len // block_size * block_size)], use_cache=True, update_past_key_values=True, block_size=block_size)
@@ -71,8 +45,7 @@ class Fast_dLLM_QwenForCausalLM:
                 else:
                     input_ids[predict_sample_idx, min_len] = next_token.squeeze(dim=-1)
         else:
-            # past_key_values = None
-             past_key_values = DynamicCache()
+            past_key_values = None
 
         seq_block_idx = seq_len // block_size
         finished_flag = torch.zeros((batch_size), device=self.device, dtype=torch.bool)
@@ -105,17 +78,8 @@ class Fast_dLLM_QwenForCausalLM:
                             x_t[sample_idx, seq_len[sample_idx]+stop_token_idx+1:] = tokenizer.pad_token_id
                     if finished_flag.all():
                         break
-
-                    # add
-                    # _enable_attn_record()
-
                     output = self.forward(input_ids=x_t[:, -block_size:], use_cache=True, past_key_values=past_key_values, update_past_key_values=True, block_size=block_size)
-
-                    # add
-                    # _collect_attn()
-                    
                     logits, past_key_values = output.logits, output.past_key_values
-                    
                     next_token = logits[:, -1:, :].argmax(dim=-1)
                     next_token[finished_flag] = tokenizer.pad_token_id
                     x_t = torch.cat([x_t, next_token], dim=1)
@@ -123,7 +87,6 @@ class Fast_dLLM_QwenForCausalLM:
 
                     break
                 
-
                 for small_block_idx in range(num_small_blocks):
                     small_block_start_idx = small_block_idx * small_block_size
                     small_block_end_idx = small_block_start_idx + small_block_size
@@ -145,14 +108,7 @@ class Fast_dLLM_QwenForCausalLM:
                                 logits = self.forward(input_ids=x_t[:,start:end], use_cache=True, past_key_values=past_key_values, update_past_key_values=False, use_block_cache=True, block_past_key_values=block_past_key_values, replace_position=small_block_start_idx).logits
                                 logits = torch.cat([logits[:, :1, :], logits[:, :-1, :]], dim=1)
                         else:
-                            # add
-                            # _enable_attn_record()
-                            
                             logits = self.forward(input_ids=x_t[:, -block_size:], use_cache=True, past_key_values=past_key_values, update_past_key_values=False).logits
-                            
-                            # add
-                            # _collect_attn()
-                            
                             logits = torch.cat([logits[:, :1, :], logits[:, :-1, :]], dim=1)
                             logits = logits[:, start:end]
                         x_1, p_1t = self.sample_with_top_p(logits, top_p=top_p, temperature=temperature)
