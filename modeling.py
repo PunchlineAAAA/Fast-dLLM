@@ -171,9 +171,6 @@ class Fast_dLLM_QwenAttention(nn.Module):
         self.v_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * self.head_dim, bias=True)
         self.o_proj = nn.Linear(config.num_attention_heads * self.head_dim, config.hidden_size, bias=False)
         self.sliding_window = config.sliding_window if config.layer_types[layer_idx] == "sliding_attention" else None
-        # add
-        self._attn_trace = []
-        self._attn_tokens = []
 
     def forward(
         self,
@@ -185,7 +182,6 @@ class Fast_dLLM_QwenAttention(nn.Module):
         update_past_key_values: Optional[bool] = False,
         block_past_key_values: Optional[Cache] = None,
         replace_position: Optional[int] = None,
-        token_ids: Optional[torch.LongTensor] = None,   # <<< 新增
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
         input_shape = hidden_states.shape[:-1]
@@ -252,59 +248,6 @@ class Fast_dLLM_QwenAttention(nn.Module):
                 **kwargs,
             )
 
-            # add
-            if not hasattr(self, "_attn_trace"):
-                self._attn_trace = []
-            if not hasattr(self, "_attn_tokens"):
-                self._attn_tokens = []
-            if not hasattr(self, "_attn_mask"):
-                self._attn_mask = []
-
-            if attn_weights is not None:
-                # sdpa 后端直接给了注意力矩阵 [B, H, L_q, L_k]
-                self._last_attn = attn_weights.detach().cpu()
-            else:
-                # fallback：手动从 Q/K 计算注意力（考虑 GQA + block mask）
-                q = query_states.float()   # [B, H_q, L_q, D]
-                k = key_states.float()     # [B, H_k, L_k, D]
-
-                # 处理 GQA：如果 Q 和 K 的 head 数不同，就用 repeat_kv 扩展 K
-                if q.size(1) != k.size(1):
-                    k = repeat_kv(k, self.num_key_value_groups)  # 变成 [B, H_q, L_k, D]
-
-                # 原始 score
-                scores = torch.matmul(q, k.transpose(-1, -2)) * self.scaling  # [B, H_q, L_q, L_k]
-
-                # 加上 block diffusion 的 attention_mask（eval_mask 产生的那个）
-                if attention_mask is not None:
-                    mask = attention_mask.to(device=q.device)
-                    if mask.dtype != torch.bool:
-                        mask = mask.to(torch.bool)
-
-                    # 扩展到 [1, 1, L_q, L_k]，和 scores 对齐
-                    while mask.dim() < 4:
-                        mask = mask.unsqueeze(0)
-
-                    scores = scores.masked_fill(~mask, float("-inf"))
-
-                attn = torch.softmax(scores, dim=-1)
-                self._last_attn = attn.detach().cpu()
-
-            # 存这一 forward step 的注意力
-            self._attn_trace.append(self._last_attn)
-
-            # 存这一 forward step 的「输入 token 序列」(通常就是当前 noisy block)
-            if token_ids is not None:
-                # 期望形状 [B, L_q]，这里只支持 batch=1 的可视化场景
-                if token_ids.dim() == 2:
-                    self._attn_tokens.append(token_ids.detach().cpu())
-                else:
-                    # 防御性处理：压到 [1, L] 再存
-                    self._attn_tokens.append(token_ids.view(1, -1).detach().cpu())
-            # 存这一 forward step 的 mask，便于计算可见 key 数
-            if isinstance(attention_mask, torch.Tensor):
-                self._attn_mask.append(attention_mask.detach().cpu())
-
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
         return attn_output
@@ -355,7 +298,6 @@ class Fast_dLLM_QwenDecoderLayer(GradientCheckpointingLayer):
         use_block_cache: Optional[bool] = False,
         block_past_key_values: Optional[Cache] = None,
         replace_position: Optional[int] = None,
-        token_ids: Optional[torch.LongTensor] = None,   # <<< 新增
         **kwargs
     ) -> tuple[torch.Tensor]:
         residual = hidden_states
@@ -373,7 +315,6 @@ class Fast_dLLM_QwenDecoderLayer(GradientCheckpointingLayer):
             use_block_cache=use_block_cache,
             block_past_key_values=block_past_key_values,
             replace_position=replace_position,
-            token_ids=token_ids,   # <<< 新增
             **kwargs,
         )
         hidden_states = residual + hidden_states
@@ -555,9 +496,6 @@ class Fast_dLLM_QwenModel(Fast_dLLM_QwenPreTrainedModel):
 
         hidden_states = inputs_embeds
 
-        # add
-        step_token_ids = input_ids if input_ids is not None else None
-        
         # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
@@ -574,7 +512,6 @@ class Fast_dLLM_QwenModel(Fast_dLLM_QwenPreTrainedModel):
                 use_block_cache=use_block_cache,
                 block_past_key_values=block_past_key_values,
                 replace_position=replace_position,
-                token_ids=step_token_ids,
                 **kwargs,
             )
 
